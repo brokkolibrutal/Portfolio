@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Brokkoli Portfolio-Monitor", layout="wide")
 
@@ -49,21 +51,23 @@ def load_transactions():
     df["Gesamtwert_num"] = df["Gesamtwert"].apply(clean_number) if "Gesamtwert" in df.columns else 0.0
     if "ISIN" in df.columns:
         df["ISIN"] = df["ISIN"].astype(str).str.strip()
+    if "Datum" in df.columns:
+        df["Datum"] = pd.to_datetime(df["Datum"], errors="coerce")
     return df
 
-# Vollständiges ISIN-zu-Ticker-Mapping für deine Positionen
+# Vollständiges ISIN-zu-Ticker-Mapping
 ISIN_TO_TICKER = {
     "CA05156X8504": "ACB",        # Aurora Cannabis
     "DE0005313704": "AFX.DE",     # Carl Zeiss Meditec
     "DE0006452907": "NEM.DE",     # Nemetschek
     "DE0007164600": "SAP.DE",     # SAP SE
     "DE000A0D9PT0": "MTX.DE",     # MTU Aero Engines
-    "DK0062498333": "NOV.DE",     # Novo-Nordisk B (Xetra EUR)
-    "FR0000120321": "OR.PA",      # L'Oreal (Euronext EUR)
+    "DK0062498333": "NOV.DE",     # Novo-Nordisk B
+    "FR0000120321": "OR.PA",      # L'Oreal
     "KYG694511059": "PAX",        # Patria Investments
     "KYG875721634": "0700.HK",    # Tencent Holdings
-    "NL0000235190": "AIR.DE",     # Airbus (Xetra EUR)
-    "NL0000395903": "WKL.AS",     # Wolters Kluwer (Euronext EUR)
+    "NL0000235190": "AIR.DE",     # Airbus
+    "NL0000395903": "WKL.AS",     # Wolters Kluwer
     "NO0012470089": "TOM.OL",     # Tomra Systems
     "US0091581068": "APD",        # Air Products & Chemicals
     "US02079K1079": "GOOG",       # Alphabet C
@@ -96,7 +100,6 @@ ISIN_TO_TICKER = {
 
 @st.cache_data(ttl=300)
 def get_fx_rates():
-    """Holt aktuelle Wechselkurse (EUR zu USD/NOK/HKD/CAD) für saubere EUR-Bewertung."""
     rates = {"EUR": 1.0}
     pairs = {"USD": "EURUSD=X", "NOK": "EURNOK=X", "HKD": "EURHKD=X", "CAD": "EURCAD=X"}
     for curr, symbol in pairs.items():
@@ -116,13 +119,13 @@ if st.button("🔄 Daten jetzt neu aus GDrive laden"):
 
 df = load_transactions()
 
-# --- 3. BESTAND & DURCHSCHNITTSKURS BERECHNEN (NACH ISIN) ---
-trades = df[df["Typ"].isin(["Kauf", "Verkauf"]) & (df["ISIN"] != "-")].copy()
+# --- 3. BESTAND & DURCHSCHNITTSKURS BERECHNEN ---
+valid_types = ["Kauf", "Verkauf"]
+trades = df[df["Typ"].isin(valid_types) & (df["ISIN"] != "-")].copy()
 
 portfolio_list = []
 for isin, group in trades.groupby("ISIN"):
-    if "Datum" in group.columns:
-        group = group.sort_values(by="Datum", ascending=True)
+    group = group.sort_values(by="Datum", ascending=True)
 
     bestand = 0.0
     investiert = 0.0
@@ -143,7 +146,6 @@ for isin, group in trades.groupby("ISIN"):
 
     if bestand > 0.001:
         einstandskurs = investiert / bestand
-        # Aktuellsten Namen aus dem letzten Trade dieser ISIN nehmen
         name = group["Name"].iloc[-1]
         portfolio_list.append({
             "ISIN": isin,
@@ -156,7 +158,6 @@ for isin, group in trades.groupby("ISIN"):
 aktiv = pd.DataFrame(portfolio_list)
 
 if not aktiv.empty:
-    # --- 4. AKTUELLE KURSE ABRUFEN & IN EUR UMRECHNEN ---
     fx_rates = get_fx_rates()
     aktuelle_kurse = []
 
@@ -180,7 +181,6 @@ if not aktiv.empty:
             except Exception:
                 preis_eur = None
 
-        # Fallback auf Einstandskurs (z.B. bei nicht börsennotierten/illiquiden Werten)
         if preis_eur is None or pd.isna(preis_eur):
             preis_eur = einstand
 
@@ -193,7 +193,6 @@ if not aktiv.empty:
         lambda r: (r["Gewinn / Verlust (€)"] / r["Netto_Invest"] * 100) if r["Netto_Invest"] > 0 else 0.0, axis=1
     )
 
-    # Alphabetisch nach Name sortieren
     aktiv = aktiv.sort_values(by="Name", ascending=True)
 
     # --- 5. KPI-ÜBERSICHT & TABELLE ---
@@ -205,7 +204,7 @@ if not aktiv.empty:
     col1, col2, col3 = st.columns(3)
     col1.metric("Aktueller Depotwert", f"{gesamt_wert:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
     col2.metric("Investiertes Kapital", f"{gesamt_invest:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-    col3.metric("Gesamt-Performance", f"{gesamt_gv:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."), f"{gesamt_perf:+.2f} %")
+    col3.metric("Gesamt-Performance", f"{gesamt_gv:,.2f} €", f"{gesamt_perf:+.2f} %")
 
     st.dataframe(
         aktiv[["Name", "ISIN", "Bestand", "Einstandskurs (€)", "Aktueller Kurs (€)", "Aktueller Wert (€)", "Gewinn / Verlust (€)", "Performance (%)"]],
@@ -220,5 +219,53 @@ if not aktiv.empty:
             "Performance (%)": st.column_config.NumberColumn(format="%+.2f %%"),
         }
     )
+
+    st.markdown("---")
+    st.subheader("📈 Portfolio-Wachstum (Historie)")
+
+    # --- 6. ZEITRAUM-SCHALTER & LINIEN-CHART ---
+    timeframe = st.radio(
+        "Zeitraum wählen:",
+        ["Gesamte Zeit", "1 Jahr", "1 Monat", "1 Tag"],
+        horizontal=True
+    )
+
+    # Historische Entwicklung aus Einzahlungen / Transaktionen berechnen
+    hist_df = df.sort_values(by="Datum").copy()
+    hist_df["Netto_Cashflow"] = hist_df.apply(
+        lambda r: r["Gesamtwert_num"] if r["Typ"] in ["Einzahlung", "Kauf"] else (-r["Gesamtwert_num"] if r["Typ"] in ["Verkauf", "Auszahlung"] else 0),
+        axis=1
+    )
+    
+    # Kumuliertes investiertes Kapital über die Zeit
+    hist_df["Kumuliert_Investiert"] = hist_df["Gesamtwert_num"].cumsum()
+    
+    # Gruppieren nach Datum für den Chart
+    chart_data = hist_df.groupby(hist_df["Datum"].dt.date)["Gesamtwert_num"].sum().cumsum().reset_index()
+    chart_data.columns = ["Datum", "Kapital"]
+    chart_data["Datum"] = pd.to_datetime(chart_data["Datum"])
+    chart_data = chart_data.set_index("Datum")
+
+    # Zeitraum filtern
+    latest_date = chart_data.index.max()
+    if pd.isna(latest_date):
+        latest_date = datetime.today()
+
+    if timeframe == "1 Tag":
+        start_date = latest_date - timedelta(days=1)
+    elif timeframe == "1 Monat":
+        start_date = latest_date - timedelta(days=30)
+    elif timeframe == "1 Jahr":
+        start_date = latest_date - timedelta(days=365)
+    else: # Gesamte Zeit
+        start_date = chart_data.index.min()
+
+    filtered_chart = chart_data[chart_data.index >= start_date]
+
+    if not filtered_chart.empty:
+        st.line_chart(filtered_chart)
+    else:
+        st.info("Für den ausgewählten Zeitraum sind keine Daten verfügbar.")
+
 else:
     st.info("Keine aktiven Positionen im Depot gefunden.")
