@@ -49,7 +49,7 @@ def load_transactions():
     df["Gesamtwert_num"] = df["Gesamtwert"].apply(clean_number) if "Gesamtwert" in df.columns else 0.0
     return df
 
-# Vollständiges Mapping deiner WKNs zu Euro-Tickern (Xetra/Tradegate/US)
+# Vollständiges Ticker-Mapping für deine Positionen
 WKN_TO_TICKER = {
     "531370": "AFX.DE",   # Carl Zeiss Meditec
     "633835": "SJM",      # J.M. Smucker
@@ -61,15 +61,21 @@ WKN_TO_TICKER = {
     "853862": "GIS",      # General Mills
     "853888": "OR.PA",    # L'Oreal
     "854161": "ADM",      # Archer-Daniels-Midland
-    "A3EU6F": "NOV.DE",   # Novo-Nordisk B
-    "A1JX4P": "4S0.DE",   # ServiceNow
-    "A0YA2M": "VRSK",     # Verisk Analytics
-    "A0J2R1": "WKL.AS",   # Wolters Kluwer
-    "A42D4F": "A42D4F.SG",# Space Exploration Tech
-    "859892": "TER",      # Teradyne
-    "938914": "AIR.DE",   # Airbus
+    "854912": "APD",      # Air Products & Chemicals
+    "906866": "AMZN",     # Amazon
+    "923189": "CSWC",     # Capital Southwest
     "927079": "ILMN",     # Illumina
     "929198": "UPS",      # UPS
+    "938914": "AIR.DE",   # Airbus
+    "A0J2R1": "WKL.AS",   # Wolters Kluwer
+    "A0YA2M": "VRSK",     # Verisk Analytics
+    "A1JX4P": "4S0.DE",   # ServiceNow
+    "A14Y6H": "GOOG",     # Alphabet C
+    "A2PWWB": "EH",       # EHang Holdings
+    "A3CTH8": "CLWR",     # Clear Secure
+    "A3EU6F": "NOV.DE",   # Novo-Nordisk B
+    "A42D4F": "A42D4F.SG",# Space Exploration Tech
+    "859892": "TER",      # Teradyne
 }
 
 st.title("📊 Aktuelle Portfolio-Performance")
@@ -80,14 +86,11 @@ if st.button("🔄 Daten jetzt neu aus GDrive laden"):
 
 df = load_transactions()
 
-# --- 3. BESTAND & DURCHSCHNITTSKURS BERECHNEN (GEWICHTETER DURSCHNITT) ---
+# --- 3. BESTAND & DURCHSCHNITTSKURS BERECHNEN ---
 trades = df[df["Typ"].isin(["Kauf", "Verkauf"])].copy()
 
-# Wir berechnen den aktuellen Bestand pro WKN/Name iterativ oder über Aggregation
-# Um realistische Einstandskurse bei Teilverkäufen zu haben:
 portfolio_list = []
 for (wkn, name), group in trades.groupby(["WKN", "Name"]):
-    # Nach Datum sortieren, falls Datum vorhanden
     if "Datum" in group.columns:
         group = group.sort_values(by="Datum", ascending=True)
     
@@ -104,7 +107,6 @@ for (wkn, name), group in trades.groupby(["WKN", "Name"]):
             bestand += stk
         elif typ == "Verkauf":
             if bestand > 0:
-                # Anteiligen Einstand herausrechnen
                 avg_price = investiert / bestand if bestand > 0 else 0
                 investiert -= (stk * avg_price)
             bestand -= stk
@@ -124,8 +126,11 @@ aktiv = pd.DataFrame(portfolio_list)
 if not aktiv.empty:
     # --- 4. AKTUELLE KURSE ABRUFEN ---
     aktuelle_kurse = []
-    for wkn in aktiv["WKN"]:
+    for idx, row in aktiv.iterrows():
+        wkn = row["WKN"]
+        einstand = row["Einstandskurs (€)"]
         ticker_symbol = WKN_TO_TICKER.get(wkn)
+        
         preis = None
         if ticker_symbol:
             try:
@@ -134,12 +139,15 @@ if not aktiv.empty:
                     preis = hist["Close"].iloc[-1]
             except Exception:
                 preis = None
+        
+        # Fallback: Wenn kein Live-Kurs ermittelbar, nimm den Einstandskurs (verhindert 0€ Absturz)
+        if preis is None or pd.isna(preis):
+            preis = einstand
+            
         aktuelle_kurse.append(preis)
 
     aktiv["Aktueller Kurs (€)"] = aktuelle_kurse
-    
-    # Falls US-Ticker in USD, einfache Annahme / Anzeige (oder direkt Wert berechnen)
-    aktiv["Aktueller Wert (€)"] = aktiv["Bestand"] * aktiv["Aktueller Kurs (€)"].fillna(0)
+    aktiv["Aktueller Wert (€)"] = aktiv["Bestand"] * aktiv["Aktueller Kurs (€)"]
     aktiv["Gewinn / Verlust (€)"] = aktiv["Aktueller Wert (€)"] - aktiv["Netto_Invest"]
     aktiv["Performance (%)"] = aktiv.apply(
         lambda r: (r["Gewinn / Verlust (€)"] / r["Netto_Invest"] * 100) if r["Netto_Invest"] > 0 else 0.0, axis=1
