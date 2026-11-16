@@ -431,4 +431,31 @@ if not aktiv.empty:
             layers = [lines]
 
             if jan_dates:
-                jan_df = pd.DataFrame({"
+                jan_df = pd.DataFrame({"Datum": jan_dates})
+                jan_rules = alt.Chart(jan_df).mark_rule(
+                    color="#888888",
+                    opacity=0.55,
+                    strokeWidth=1.2
+                ).encode(x="Datum:T")
+                layers.append(jan_rules)
+
+            if jul_dates:
+                jul_df = pd.DataFrame({"Datum": jul_dates})
+                jul_rules = alt.Chart(jul_df).mark_rule(
+                    color="#666666",
+                    opacity=0.35,
+                    strokeDash=[4, 4],
+                    strokeWidth=1.0
+                ).encode(x="Datum:T")
+                layers.append(jul_rules)
+
+            final_chart = alt.layer(*layers).properties(height=380).interactive(bind_y=False)
+        else:
+            final_chart = lines.properties(height=380).interactive(bind_y=False)
+
+        st.altair_chart(final_chart, use_container_width=True)
+    else:
+        st.info("Für den ausgewählten Zeitraum sind keine Daten verfügbar.")
+
+else:
+    st.info("Keine aktiven Positionen im Depot gefunden.")
