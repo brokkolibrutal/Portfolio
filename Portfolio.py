@@ -176,4 +176,211 @@ def build_history_series(df_input, current_prices_dict):
                             s_eur = s
                         # Nur ab dem ersten Kaufdatum füllen, damit vorher 0 steht
                         first_trade = trades[trades["ISIN"] == isin]["Date_Norm"].min()
-                        aligned = s_eur.reindex(all_dates).
+                        aligned = s_eur.reindex(all_dates).ffill()
+                        aligned.loc[aligned.index < first_trade] = 0.0
+                        price_matrix[isin] = aligned.fillna(price_matrix[isin])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Heutigen Tag exakt auf die aktuellen Live-Kurse setzen
+    for isin, cur_p in current_prices_dict.items():
+        if isin in price_matrix.columns:
+            price_matrix.loc[end_dt, isin] = cur_p
+
+    daily_depot_value = (holdings * price_matrix).sum(axis=1)
+
+    return pd.DataFrame({
+        "Depotwert (€)": daily_depot_value,
+        "Netto-Einzahlungen (€)": daily_deposits
+    }, index=all_dates)
+
+@st.cache_data(ttl=300)
+def build_intraday_series(aktiv_df, current_prices_dict, net_deposits_today):
+    """Lädt 15-Minuten-Kurse für den aktuellen Handelstag ('1 Tag')."""
+    mapped = aktiv_df[aktiv_df["ISIN"].isin(ISIN_TO_TICKER)].copy()
+    if mapped.empty:
+        return pd.DataFrame()
+
+    tickers = [ISIN_TO_TICKER[isin] for isin in mapped["ISIN"]]
+    try:
+        raw = yf.download(tickers, period="1d", interval="15m", progress=False, group_by="ticker")
+        intraday_frames = {}
+        for _, row in mapped.iterrows():
+            isin = row["ISIN"]
+            sym = ISIN_TO_TICKER[isin]
+            qty = row["Bestand"]
+            try:
+                s = raw["Close"] if len(tickers) == 1 else raw[sym]["Close"]
+                s = s.dropna()
+                if not s.empty and s.iloc[-1] > 0:
+                    s.index = pd.to_datetime(s.index).tz_localize(None)
+                    scale = current_prices_dict[isin] / float(s.iloc[-1])
+                    intraday_frames[isin] = s * scale * qty
+            except Exception:
+                pass
+
+        if not intraday_frames:
+            return pd.DataFrame()
+
+        df_intra = pd.DataFrame(intraday_frames).ffill().bfill()
+        # Nicht-gemappte Fallback-Positionen konstant hinzuaddieren
+        unmapped_val = aktiv_df[~aktiv_df["ISIN"].isin(intraday_frames.keys())]["Aktueller Wert (€)"].sum()
+        total_series = df_intra.sum(axis=1) + unmapped_val
+
+        return pd.DataFrame({
+            "Depotwert (€)": total_series,
+            "Netto-Einzahlungen (€)": net_deposits_today
+        })
+    except Exception:
+        return pd.DataFrame()
+
+st.title("📊 Aktuelle Portfolio-Performance")
+
+if st.button("🔄 Daten jetzt neu aus GDrive laden"):
+    st.cache_data.clear()
+    st.rerun()
+
+df = load_transactions()
+
+# --- 3. BESTAND & DURCHSCHNITTSKURS BERECHNEN ---
+valid_types = ["Kauf", "Verkauf"]
+trades = df[df["Typ"].isin(valid_types) & (df["ISIN"] != "-")].copy()
+
+portfolio_list = []
+for isin, group in trades.groupby("ISIN"):
+    group = group.sort_values(by="Datum", ascending=True)
+
+    bestand = 0.0
+    investiert = 0.0
+
+    for _, row in group.iterrows():
+        stk = row["Stückzahl_num"]
+        wert = row["Gesamtwert_num"]
+        typ = row["Typ"]
+
+        if typ == "Kauf":
+            investiert += wert
+            bestand += stk
+        elif typ == "Verkauf":
+            if bestand > 0:
+                avg_price = investiert / bestand
+                investiert -= (stk * avg_price)
+            bestand -= stk
+
+    if bestand > 0.001:
+        einstandskurs = investiert / bestand
+        name = group["Name"].iloc[-1]
+        portfolio_list.append({
+            "ISIN": isin,
+            "Name": name,
+            "Bestand": bestand,
+            "Netto_Invest": max(0.0, investiert),
+            "Einstandskurs (€)": einstandskurs
+        })
+
+aktiv = pd.DataFrame(portfolio_list)
+
+if not aktiv.empty:
+    fx_rates = get_fx_rates()
+    aktuelle_kurse = []
+    current_prices_map = {}
+
+    for _, row in aktiv.iterrows():
+        isin = row["ISIN"]
+        einstand = row["Einstandskurs (€)"]
+        ticker_symbol = ISIN_TO_TICKER.get(isin)
+
+        preis_eur = None
+        if ticker_symbol:
+            try:
+                t = yf.Ticker(ticker_symbol)
+                hist = t.history(period="5d")
+                if not hist.empty:
+                    raw_price = float(hist["Close"].iloc[-1])
+                    currency = t.fast_info.get("currency", "EUR")
+                    if currency in fx_rates and fx_rates[currency] > 0:
+                        preis_eur = raw_price / fx_rates[currency]
+                    else:
+                        preis_eur = raw_price
+            except Exception:
+                preis_eur = None
+
+        if preis_eur is None or pd.isna(preis_eur):
+            preis_eur = einstand
+
+        aktuelle_kurse.append(preis_eur)
+        current_prices_map[isin] = preis_eur
+
+    aktiv["Aktueller Kurs (€)"] = aktuelle_kurse
+    aktiv["Aktueller Wert (€)"] = aktiv["Bestand"] * aktiv["Aktueller Kurs (€)"]
+    aktiv["Gewinn / Verlust (€)"] = aktiv["Aktueller Wert (€)"] - aktiv["Netto_Invest"]
+    aktiv["Performance (%)"] = aktiv.apply(
+        lambda r: (r["Gewinn / Verlust (€)"] / r["Netto_Invest"] * 100) if r["Netto_Invest"] > 0 else 0.0, axis=1
+    )
+
+    aktiv = aktiv.sort_values(by="Name", ascending=True)
+
+    # --- 5. KPI-ÜBERSICHT & TABELLE ---
+    gesamt_invest = aktiv["Netto_Invest"].sum()
+    gesamt_wert = aktiv["Aktueller Wert (€)"].sum()
+    gesamt_gv = gesamt_wert - gesamt_invest
+    gesamt_perf = (gesamt_gv / gesamt_invest * 100) if gesamt_invest > 0 else 0
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Aktueller Depotwert", f"{gesamt_wert:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+    col2.metric("Investiertes Kapital", f"{gesamt_invest:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+    col3.metric("Gesamt-Performance", f"{gesamt_gv:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."), f"{gesamt_perf:+.2f} %")
+
+    st.dataframe(
+        aktiv[["Name", "ISIN", "Bestand", "Einstandskurs (€)", "Aktueller Kurs (€)", "Aktueller Wert (€)", "Gewinn / Verlust (€)", "Performance (%)"]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Bestand": st.column_config.NumberColumn(format="%.2f"),
+            "Einstandskurs (€)": st.column_config.NumberColumn(format="%.2f €"),
+            "Aktueller Kurs (€)": st.column_config.NumberColumn(format="%.2f €"),
+            "Aktueller Wert (€)": st.column_config.NumberColumn(format="%.2f €"),
+            "Gewinn / Verlust (€)": st.column_config.NumberColumn(format="%+.2f €"),
+            "Performance (%)": st.column_config.NumberColumn(format="%+.2f %%"),
+        }
+    )
+
+    st.markdown("---")
+    st.subheader("📈 Portfolio-Wachstum (Historie)")
+
+    # --- 6. ZEITRAUM-SCHALTER & LINIEN-CHART ---
+    timeframe = st.radio(
+        "Zeitraum wählen:",
+        ["Gesamte Zeit", "1 Jahr", "1 Monat", "1 Tag"],
+        horizontal=True
+    )
+
+    history_df = build_history_series(df, current_prices_map)
+
+    if timeframe == "1 Tag":
+        net_dep_today = float(history_df["Netto-Einzahlungen (€)"].iloc[-1]) if not history_df.empty else 0.0
+        intra_df = build_intraday_series(aktiv, current_prices_map, net_dep_today)
+        if not intra_df.empty:
+            st.line_chart(intra_df[["Depotwert (€)"]], color=["#00CC96"])
+        else:
+            st.line_chart(history_df.tail(2)[["Depotwert (€)"]], color=["#00CC96"])
+    else:
+        end_date = history_df.index.max()
+        if timeframe == "1 Monat":
+            start_date = end_date - timedelta(days=30)
+        elif timeframe == "1 Jahr":
+            start_date = end_date - timedelta(days=365)
+        else:
+            start_date = history_df.index.min()
+
+        filtered_chart = history_df[history_df.index >= start_date]
+
+        if not filtered_chart.empty:
+            st.line_chart(filtered_chart, color=["#00CC96", "#636EFA"])
+        else:
+            st.info("Für den ausgewählten Zeitraum sind keine Daten verfügbar.")
+
+else:
+    st.info("Keine aktiven Positionen im Depot gefunden.")
