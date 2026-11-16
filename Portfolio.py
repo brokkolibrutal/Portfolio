@@ -113,9 +113,9 @@ def get_fx_rates():
     return rates
 
 @st.cache_data(ttl=3600)
-def build_history_series(df_trades_json, current_prices_dict, start_dt_str):
+def build_history_series(df_input, current_prices_dict, start_dt_str):
     """Berechnet die tägliche Entwicklung von Depotwert und Netto-Einzahlungen ab 2017."""
-    df_all = pd.read_json(df_trades_json)
+    df_all = df_input.copy()
     df_all["Datum"] = pd.to_datetime(df_all["Datum"])
     df_all = df_all.sort_values(by="Datum")
 
@@ -159,7 +159,6 @@ def build_history_series(df_trades_json, current_prices_dict, start_dt_str):
     # Historische Kurse für alle aktuell gemappten Ticker nachladen
     mapped_isins = [isin for isin in holdings.columns if isin in ISIN_TO_TICKER]
     tickers = [ISIN_TO_TICKER[isin] for isin in mapped_isins]
-    fx_rates = get_fx_rates()
 
     if tickers:
         try:
@@ -174,7 +173,6 @@ def build_history_series(df_trades_json, current_prices_dict, start_dt_str):
                     s = s.dropna()
                     if not s.empty:
                         s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
-                        # Währungsumrechnung anhand des Verhältnisses aktueller EUR-Kurs / letzter Yahoo-Kurs
                         if isin in current_prices_dict and s.iloc[-1] > 0:
                             scale_to_eur = current_prices_dict[isin] / float(s.iloc[-1])
                             s_eur = s * scale_to_eur
@@ -322,7 +320,7 @@ if not aktiv.empty:
     )
 
     min_date_str = df["Datum"].min().strftime("%Y-%m-%d") if not df["Datum"].isna().all() else "2017-04-01"
-    history_df = build_history_series(df.to_json(date_format="iso"), current_prices_map, min_date_str)
+    history_df = build_history_series(df, current_prices_map, min_date_str)
 
     end_date = history_df.index.max()
     if timeframe == "1 Tag":
