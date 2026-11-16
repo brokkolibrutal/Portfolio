@@ -49,7 +49,7 @@ def load_transactions():
     df["Gesamtwert_num"] = df["Gesamtwert"].apply(clean_number) if "Gesamtwert" in df.columns else 0.0
     return df
 
-# Vollständiges Ticker-Mapping für alle deine Positionen
+# Vollständiges Ticker-Mapping inklusive der frisch ergänzten Positionen
 WKN_TO_TICKER = {
     "531370": "AFX.DE",   # Carl Zeiss Meditec
     "633835": "SJM",      # J.M. Smucker
@@ -63,9 +63,11 @@ WKN_TO_TICKER = {
     "854161": "ADM",      # Archer-Daniels-Midland
     "854912": "APD",      # Air Products & Chemicals
     "855178": "KMB",      # Kimberly-Clark
+    "855950": "PH",       # Parker-Hannifin
     "859892": "TER",      # Teradyne
     "906866": "AMZN",     # Amazon
     "915246": "MCO",      # Moody's
+    "916647": "SPG",      # Simon Property Group
     "923189": "CSWC",     # Capital Southwest
     "927079": "ILMN",     # Illumina
     "929198": "UPS",      # UPS
@@ -73,11 +75,14 @@ WKN_TO_TICKER = {
     "A0D9PT": "MTX.DE",   # MTU Aero Engines
     "A0J2R1": "WKL.AS",   # Wolters Kluwer
     "A0YA2M": "VRSK",     # Verisk Analytics
+    "A1138D": "0700.HK",  # Tencent Holdings
     "A14Y6H": "GOOG",     # Alphabet C
     "A1JX4P": "4S0.DE",   # ServiceNow
     "A2PWWB": "EH",       # EHang Holdings
+    "A2QMNY": "PAX",      # Patria Investments
     "A3CNLD": "MRVL",     # Marvell Technology
     "A3CTH8": "CLWR",     # Clear Secure
+    "A3DHA0": "TOMRA.OL", # Tomra Systems
     "A3EU6F": "NOV.DE",   # Novo-Nordisk B
     "A42D4F": "A42D4F.SG",# Space Exploration Tech
     "889495": "MAA",      # Mid-America Apartment Communities
@@ -110,7 +115,7 @@ for (wkn, name), group in trades.groupby(["WKN", "Name"]):
         if typ == "Kauf":
             investiert += wert
             bestand += stk
-        elif typ == "Verkaug" or typ == "Verkauf":
+        elif typ in ["Verkauf", "Verkaug"]:
             if bestand > 0:
                 avg_price = investiert / bestand if bestand > 0 else 0
                 investiert -= (stk * avg_price)
@@ -145,7 +150,7 @@ if not aktiv.empty:
             except Exception:
                 preis = None
         
-        # Fallback auf Einstandskurs, falls der Ticker nicht erreichbar ist
+        # Fallback auf Einstandskurs, falls ein Ticker mal nicht erreichbar ist
         if preis is None or pd.isna(preis):
             preis = einstand
             
