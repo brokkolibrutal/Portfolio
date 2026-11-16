@@ -49,7 +49,7 @@ def load_transactions():
     df["Gesamtwert_num"] = df["Gesamtwert"].apply(clean_number) if "Gesamtwert" in df.columns else 0.0
     return df
 
-# Vollständiges Ticker-Mapping für deine Positionen
+# Vollständiges Ticker-Mapping für alle deine Positionen
 WKN_TO_TICKER = {
     "531370": "AFX.DE",   # Carl Zeiss Meditec
     "633835": "SJM",      # J.M. Smucker
@@ -62,20 +62,25 @@ WKN_TO_TICKER = {
     "853888": "OR.PA",    # L'Oreal
     "854161": "ADM",      # Archer-Daniels-Midland
     "854912": "APD",      # Air Products & Chemicals
+    "855178": "KMB",      # Kimberly-Clark
+    "859892": "TER",      # Teradyne
     "906866": "AMZN",     # Amazon
+    "915246": "MCO",      # Moody's
     "923189": "CSWC",     # Capital Southwest
     "927079": "ILMN",     # Illumina
     "929198": "UPS",      # UPS
     "938914": "AIR.DE",   # Airbus
+    "A0D9PT": "MTX.DE",   # MTU Aero Engines
     "A0J2R1": "WKL.AS",   # Wolters Kluwer
     "A0YA2M": "VRSK",     # Verisk Analytics
-    "A1JX4P": "4S0.DE",   # ServiceNow
     "A14Y6H": "GOOG",     # Alphabet C
+    "A1JX4P": "4S0.DE",   # ServiceNow
     "A2PWWB": "EH",       # EHang Holdings
+    "A3CNLD": "MRVL",     # Marvell Technology
     "A3CTH8": "CLWR",     # Clear Secure
     "A3EU6F": "NOV.DE",   # Novo-Nordisk B
     "A42D4F": "A42D4F.SG",# Space Exploration Tech
-    "859892": "TER",      # Teradyne
+    "889495": "MAA",      # Mid-America Apartment Communities
 }
 
 st.title("📊 Aktuelle Portfolio-Performance")
@@ -105,7 +110,7 @@ for (wkn, name), group in trades.groupby(["WKN", "Name"]):
         if typ == "Kauf":
             investiert += wert
             bestand += stk
-        elif typ == "Verkauf":
+        elif typ == "Verkaug" or typ == "Verkauf":
             if bestand > 0:
                 avg_price = investiert / bestand if bestand > 0 else 0
                 investiert -= (stk * avg_price)
@@ -140,7 +145,7 @@ if not aktiv.empty:
             except Exception:
                 preis = None
         
-        # Fallback: Wenn kein Live-Kurs ermittelbar, nimm den Einstandskurs (verhindert 0€ Absturz)
+        # Fallback auf Einstandskurs, falls der Ticker nicht erreichbar ist
         if preis is None or pd.isna(preis):
             preis = einstand
             
