@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import altair as alt
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Brokkoli Portfolio-Monitor", layout="wide")
@@ -53,7 +54,6 @@ def load_transactions():
     if "ISIN" in df.columns:
         df["ISIN"] = df["ISIN"].astype(str).str.strip()
     if "Datum" in df.columns:
-        # Unterstützt sowohl YYYY-MM-DD als auch DD.MM.YYYY gemischt
         df["Datum"] = pd.to_datetime(df["Datum"], format="mixed", dayfirst=True, errors="coerce")
     return df
 
@@ -152,7 +152,7 @@ def build_history_series(df_input, current_prices_dict):
     )
     holdings = holdings.clip(lower=0.0)
 
-    # 3. Preis-Matrix aufbauen (Trade-Kurse als Basis + Yahoo-Tageskurse ab Kaufdatum)
+    # 3. Preis-Matrix aufbauen
     trade_prices = trades.pivot_table(index="Date_Norm", columns="ISIN", values="Kurs_num", aggfunc="last")
     price_matrix = trade_prices.reindex(all_dates).ffill().fillna(0.0)
 
@@ -174,7 +174,6 @@ def build_history_series(df_input, current_prices_dict):
                             s_eur = s * scale_to_eur
                         else:
                             s_eur = s
-                        # Nur ab dem ersten Kaufdatum füllen, damit vorher 0 steht
                         first_trade = trades[trades["ISIN"] == isin]["Date_Norm"].min()
                         aligned = s_eur.reindex(all_dates).ffill()
                         aligned.loc[aligned.index < first_trade] = 0.0
@@ -184,7 +183,6 @@ def build_history_series(df_input, current_prices_dict):
         except Exception:
             pass
 
-    # Heutigen Tag exakt auf die aktuellen Live-Kurse setzen
     for isin, cur_p in current_prices_dict.items():
         if isin in price_matrix.columns:
             price_matrix.loc[end_dt, isin] = cur_p
@@ -225,7 +223,6 @@ def build_intraday_series(aktiv_df, current_prices_dict, net_deposits_today):
             return pd.DataFrame()
 
         df_intra = pd.DataFrame(intraday_frames).ffill().bfill()
-        # Nicht-gemappte Fallback-Positionen konstant hinzuaddieren
         unmapped_val = aktiv_df[~aktiv_df["ISIN"].isin(intraday_frames.keys())]["Aktueller Wert (€)"].sum()
         total_series = df_intra.sum(axis=1) + unmapped_val
 
@@ -350,7 +347,7 @@ if not aktiv.empty:
     st.markdown("---")
     st.subheader("📈 Portfolio-Wachstum (Historie)")
 
-    # --- 6. ZEITRAUM-SCHALTER & LINIEN-CHART ---
+    # --- 6. ZEITRAUM-SCHALTER & LINIEN-CHART MIT JAHRES- & HALBJAHRESLINIEN ---
     timeframe = st.radio(
         "Zeitraum wählen:",
         ["Gesamte Zeit", "1 Jahr", "1 Monat", "1 Tag"],
@@ -362,25 +359,76 @@ if not aktiv.empty:
     if timeframe == "1 Tag":
         net_dep_today = float(history_df["Netto-Einzahlungen (€)"].iloc[-1]) if not history_df.empty else 0.0
         intra_df = build_intraday_series(aktiv, current_prices_map, net_dep_today)
-        if not intra_df.empty:
-            st.line_chart(intra_df[["Depotwert (€)"]], color=["#00CC96"])
-        else:
-            st.line_chart(history_df.tail(2)[["Depotwert (€)"]], color=["#00CC96"])
+        plot_df = intra_df[["Depotwert (€)"]] if not intra_df.empty else history_df.tail(2)[["Depotwert (€)"]]
+        show_year_guides = False
     else:
         end_date = history_df.index.max()
         if timeframe == "1 Monat":
             start_date = end_date - timedelta(days=30)
+            show_year_guides = False
         elif timeframe == "1 Jahr":
             start_date = end_date - timedelta(days=365)
+            show_year_guides = True
         else:
             start_date = history_df.index.min()
+            show_year_guides = True
 
-        filtered_chart = history_df[history_df.index >= start_date]
+        plot_df = history_df[history_df.index >= start_date]
 
-        if not filtered_chart.empty:
-            st.line_chart(filtered_chart, color=["#00CC96", "#636EFA"])
+    if not plot_df.empty:
+        chart_source = plot_df.reset_index().rename(columns={"index": "Datum"})
+        chart_long = chart_source.melt("Datum", var_name="Kennzahl", value_name="Betrag (€)")
+
+        # X-Achse: Bei Gesamte Zeit / 1 Jahr nur Jahreszahlen ohne Monatsangabe
+        if show_year_guides:
+            x_axis = alt.X(
+                "Datum:T",
+                title=None,
+                axis=alt.Axis(
+                    format="%Y",
+                    tickCount="year",
+                    grid=False,
+                    labelAngle=0
+                )
+            )
         else:
-            st.info("Für den ausgewählten Zeitraum sind keine Daten verfügbar.")
+            x_axis = alt.X(
+                "Datum:T",
+                title=None,
+                axis=alt.Axis(
+                    format="%d.%m. %H:%M" if timeframe == "1 Tag" else "%d.%m.%Y",
+                    grid=True
+                )
+            )
 
-else:
-    st.info("Keine aktiven Positionen im Depot gefunden.")
+        lines = alt.Chart(chart_long).mark_line(strokeWidth=2.2).encode(
+            x=x_axis,
+            y=alt.Y("Betrag (€):Q", title="Betrag (€)", scale=alt.Scale(zero=(timeframe == "Gesamte Zeit"))),
+            color=alt.Color(
+                "Kennzahl:N",
+                scale=alt.Scale(
+                    domain=["Depotwert (€)", "Netto-Einzahlungen (€)"],
+                    range=["#00CC96", "#636EFA"]
+                ),
+                legend=alt.Legend(orient="bottom", title=None)
+            ),
+            tooltip=[
+                alt.Tooltip("Datum:T", title="Datum", format="%d.%m.%Y" if timeframe != "1 Tag" else "%d.%m.%Y %H:%M"),
+                alt.Tooltip("Kennzahl:N", title="Kategorie"),
+                alt.Tooltip("Betrag (€):Q", title="Wert", format=",.2f")
+            ]
+        )
+
+        # Vertikale Orientierungslinien bei 1.1. und 1.7. jeden Jahres
+        if show_year_guides:
+            min_dt = chart_source["Datum"].min()
+            max_dt = chart_source["Datum"].max()
+            years = range(min_dt.year, max_dt.year + 1)
+
+            jan_dates = [pd.Timestamp(year=y, month=1, day=1) for y in years if min_dt <= pd.Timestamp(year=y, month=1, day=1) <= max_dt]
+            jul_dates = [pd.Timestamp(year=y, month=7, day=1) for y in years if min_dt <= pd.Timestamp(year=y, month=7, day=1) <= max_dt]
+
+            layers = [lines]
+
+            if jan_dates:
+                jan_df = pd.DataFrame({"
