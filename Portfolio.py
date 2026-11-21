@@ -113,6 +113,49 @@ def get_fx_rates():
             pass
     return rates
 
+@st.cache_data(ttl=300)
+def get_quote_snapshots(isins_tuple):
+    """Lädt aktuellen Kurs, Vortagesschluss (1 Tag) und Schlusskurs vor 1 Jahr (in EUR)."""
+    fx_rates = get_fx_rates()
+    snapshots = {}
+    target_1y = pd.Timestamp.today().normalize() - timedelta(days=365)
+
+    for isin in isins_tuple:
+        sym = ISIN_TO_TICKER.get(isin)
+        if not sym:
+            continue
+        try:
+            t = yf.Ticker(sym)
+            hist = t.history(period="13mo")
+            if hist.empty:
+                continue
+
+            hist = hist.dropna(subset=["Close"])
+            hist.index = pd.to_datetime(hist.index).tz_localize(None).normalize()
+
+            currency = t.fast_info.get("currency", "EUR")
+            fx = fx_rates.get(currency, 1.0)
+            if not fx or fx <= 0:
+                fx = 1.0
+
+            cur_eur = float(hist["Close"].iloc[-1]) / fx
+            prev_1d_eur = float(hist["Close"].iloc[-2]) / fx if len(hist) >= 2 else cur_eur
+
+            hist_1y = hist[hist.index <= target_1y]
+            if not hist_1y.empty:
+                prev_1y_eur = float(hist_1y["Close"].iloc[-1]) / fx
+            else:
+                prev_1y_eur = float(hist["Close"].iloc[0]) / fx
+
+            snapshots[isin] = {
+                "current": cur_eur,
+                "prev_1d": prev_1d_eur,
+                "prev_1y": prev_1y_eur,
+            }
+        except Exception:
+            pass
+    return snapshots
+
 @st.cache_data(ttl=3600)
 def build_history_series(df_input, current_prices_dict):
     """Berechnet die tägliche Entwicklung von Depotwert und Netto-Einzahlungen ab 2017."""
@@ -123,7 +166,6 @@ def build_history_series(df_input, current_prices_dict):
     start_dt = df_all["Datum"].min().normalize()
     all_dates = pd.date_range(start=start_dt, end=end_dt, freq="D")
 
-    # 1. Netto-Einzahlungen (Einzahlung - Auszahlung)
     def calc_deposit(r):
         val = abs(r["Gesamtwert_num"])
         if r["Typ"] == "Einzahlung":
@@ -140,7 +182,6 @@ def build_history_series(df_input, current_prices_dict):
         .cumsum()
     )
 
-    # 2. Täglicher Aktienbestand je ISIN
     trades = df_all[df_all["Typ"].isin(["Kauf", "Verkauf"]) & (df_all["ISIN"] != "-")].copy()
     trades["Signed_Qty"] = np.where(trades["Typ"] == "Kauf", trades["Stückzahl_num"], -trades["Stückzahl_num"])
     trades["Date_Norm"] = trades["Datum"].dt.normalize()
@@ -152,7 +193,6 @@ def build_history_series(df_input, current_prices_dict):
     )
     holdings = holdings.clip(lower=0.0)
 
-    # 3. Preis-Matrix aufbauen
     trade_prices = trades.pivot_table(index="Date_Norm", columns="ISIN", values="Kurs_num", aggfunc="last")
     price_matrix = trade_prices.reindex(all_dates).ffill().fillna(0.0)
 
@@ -251,6 +291,7 @@ for isin, group in trades.groupby("ISIN"):
 
     bestand = 0.0
     investiert = 0.0
+    first_buy_date = group["Datum"].min()
 
     for _, row in group.iterrows():
         stk = row["Stückzahl_num"]
@@ -274,47 +315,69 @@ for isin, group in trades.groupby("ISIN"):
             "Name": name,
             "Bestand": bestand,
             "Netto_Invest": max(0.0, investiert),
-            "Einstandskurs (€)": einstandskurs
+            "Einstandskurs (€)": einstandskurs,
+            "First_Buy": first_buy_date
         })
 
 aktiv = pd.DataFrame(portfolio_list)
 
 if not aktiv.empty:
-    fx_rates = get_fx_rates()
+    snapshots = get_quote_snapshots(tuple(aktiv["ISIN"].tolist()))
     aktuelle_kurse = []
+    kurse_1d = []
+    kurse_1y = []
     current_prices_map = {}
+
+    one_year_ago = pd.Timestamp.today().normalize() - timedelta(days=365)
 
     for _, row in aktiv.iterrows():
         isin = row["ISIN"]
         einstand = row["Einstandskurs (€)"]
-        ticker_symbol = ISIN_TO_TICKER.get(isin)
+        snap = snapshots.get(isin)
 
-        preis_eur = None
-        if ticker_symbol:
-            try:
-                t = yf.Ticker(ticker_symbol)
-                hist = t.history(period="5d")
-                if not hist.empty:
-                    raw_price = float(hist["Close"].iloc[-1])
-                    currency = t.fast_info.get("currency", "EUR")
-                    if currency in fx_rates and fx_rates[currency] > 0:
-                        preis_eur = raw_price / fx_rates[currency]
-                    else:
-                        preis_eur = raw_price
-            except Exception:
-                preis_eur = None
+        if snap:
+            cur_p = snap["current"]
+            p_1d = snap["prev_1d"]
+            # Wenn die Position erst innerhalb der letzten 12 Monate gekauft wurde, ist der Einstand die Basis für 1 Jahr
+            if pd.notna(row["First_Buy"]) and row["First_Buy"] > one_year_ago:
+                p_1y = einstand
+            else:
+                p_1y = snap["prev_1y"]
+        else:
+            cur_p = einstand
+            p_1d = einstand
+            p_1y = einstand
 
-        if preis_eur is None or pd.isna(preis_eur):
-            preis_eur = einstand
-
-        aktuelle_kurse.append(preis_eur)
-        current_prices_map[isin] = preis_eur
+        aktuelle_kurse.append(cur_p)
+        kurse_1d.append(p_1d)
+        kurse_1y.append(p_1y)
+        current_prices_map[isin] = cur_p
 
     aktiv["Aktueller Kurs (€)"] = aktuelle_kurse
     aktiv["Aktueller Wert (€)"] = aktiv["Bestand"] * aktiv["Aktueller Kurs (€)"]
-    aktiv["Gewinn / Verlust (€)"] = aktiv["Aktueller Wert (€)"] - aktiv["Netto_Invest"]
-    aktiv["Performance (%)"] = aktiv.apply(
-        lambda r: (r["Gewinn / Verlust (€)"] / r["Netto_Invest"] * 100) if r["Netto_Invest"] > 0 else 0.0, axis=1
+
+    # --- 4. PERFORMANCE-ZEITRAUM AUSWÄHLBAR ("Gesamt", "1 Jahr", "1 Tag") ---
+    perf_period = st.radio(
+        "Performance-Zeitraum:",
+        ["Gesamt", "1 Jahr", "1 Tag"],
+        horizontal=True
+    )
+
+    if perf_period == "1 Tag":
+        basis_werte = aktiv["Bestand"] * pd.Series(kurse_1d)
+        perf_label = "Tages-Performance (1 Tag)"
+    elif perf_period == "1 Jahr":
+        basis_werte = aktiv["Bestand"] * pd.Series(kurse_1y)
+        perf_label = "Jahres-Performance (1 Jahr)"
+    else:
+        basis_werte = aktiv["Netto_Invest"]
+        perf_label = "Gesamt-Performance"
+
+    aktiv["Gewinn / Verlust (€)"] = aktiv["Aktueller Wert (€)"] - basis_werte
+    aktiv["Performance (%)"] = np.where(
+        basis_werte > 0,
+        (aktiv["Gewinn / Verlust (€)"] / basis_werte) * 100,
+        0.0
     )
 
     aktiv = aktiv.sort_values(by="Name", ascending=True)
@@ -322,13 +385,14 @@ if not aktiv.empty:
     # --- 5. KPI-ÜBERSICHT & TABELLE ---
     gesamt_invest = aktiv["Netto_Invest"].sum()
     gesamt_wert = aktiv["Aktueller Wert (€)"].sum()
-    gesamt_gv = gesamt_wert - gesamt_invest
-    gesamt_perf = (gesamt_gv / gesamt_invest * 100) if gesamt_invest > 0 else 0
+    gesamt_gv = aktiv["Gewinn / Verlust (€)"].sum()
+    gesamt_basis = basis_werte.sum()
+    gesamt_perf = (gesamt_gv / gesamt_basis * 100) if gesamt_basis > 0 else 0.0
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Aktueller Depotwert", f"{gesamt_wert:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
     col2.metric("Investiertes Kapital", f"{gesamt_invest:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-    col3.metric("Gesamt-Performance", f"{gesamt_gv:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."), f"{gesamt_perf:+.2f} %")
+    col3.metric(perf_label, f"{gesamt_gv:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."), f"{gesamt_perf:+.2f} %")
 
     st.dataframe(
         aktiv[["Name", "ISIN", "Bestand", "Einstandskurs (€)", "Aktueller Kurs (€)", "Aktueller Wert (€)", "Gewinn / Verlust (€)", "Performance (%)"]],
@@ -349,7 +413,7 @@ if not aktiv.empty:
 
     # --- 6. ZEITRAUM-SCHALTER & LINIEN-CHART MIT JAHRES- & HALBJAHRESLINIEN ---
     timeframe = st.radio(
-        "Zeitraum wählen:",
+        "Chart-Zeitraum wählen:",
         ["Gesamte Zeit", "1 Jahr", "1 Monat", "1 Tag"],
         horizontal=True
     )
@@ -379,7 +443,6 @@ if not aktiv.empty:
         chart_source = plot_df.reset_index().rename(columns={"index": "Datum"})
         chart_long = chart_source.melt("Datum", var_name="Kennzahl", value_name="Betrag (€)")
 
-        # X-Achse: Bei Gesamte Zeit / 1 Jahr nur Jahreszahlen ohne Monatsangabe
         if show_year_guides:
             x_axis = alt.X(
                 "Datum:T",
@@ -419,7 +482,6 @@ if not aktiv.empty:
             ]
         )
 
-        # Vertikale Orientierungslinien bei 1.1. und 1.7. jeden Jahres
         if show_year_guides:
             min_dt = chart_source["Datum"].min()
             max_dt = chart_source["Datum"].max()
