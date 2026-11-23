@@ -338,7 +338,6 @@ if not aktiv.empty:
         if snap:
             cur_p = snap["current"]
             p_1d = snap["prev_1d"]
-            # Wenn die Position erst innerhalb der letzten 12 Monate gekauft wurde, ist der Einstand die Basis für 1 Jahr
             if pd.notna(row["First_Buy"]) and row["First_Buy"] > one_year_ago:
                 p_1y = einstand
             else:
@@ -382,7 +381,7 @@ if not aktiv.empty:
 
     aktiv = aktiv.sort_values(by="Name", ascending=True)
 
-    # --- 5. KPI-ÜBERSICHT & TABELLE ---
+    # --- 5. KPI-ÜBERSICHT & FARBIGE TABELLE ---
     gesamt_invest = aktiv["Netto_Invest"].sum()
     gesamt_wert = aktiv["Aktueller Wert (€)"].sum()
     gesamt_gv = aktiv["Gewinn / Verlust (€)"].sum()
@@ -394,8 +393,16 @@ if not aktiv.empty:
     col2.metric("Investiertes Kapital", f"{gesamt_invest:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
     col3.metric(perf_label, f"{gesamt_gv:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."), f"{gesamt_perf:+.2f} %")
 
+    def color_pos_neg(val):
+        if pd.isna(val) or val == 0:
+            return "color: #888888;"
+        return "color: #00CC96; font-weight: 600;" if val > 0 else "color: #FF4B4B; font-weight: 600;"
+
+    display_cols = ["Name", "ISIN", "Bestand", "Einstandskurs (€)", "Aktueller Kurs (€)", "Aktueller Wert (€)", "Gewinn / Verlust (€)", "Performance (%)"]
+    styled_df = aktiv[display_cols].style.map(color_pos_neg, subset=["Gewinn / Verlust (€)", "Performance (%)"])
+
     st.dataframe(
-        aktiv[["Name", "ISIN", "Bestand", "Einstandskurs (€)", "Aktueller Kurs (€)", "Aktueller Wert (€)", "Gewinn / Verlust (€)", "Performance (%)"]],
+        styled_df,
         use_container_width=True,
         hide_index=True,
         column_config={
