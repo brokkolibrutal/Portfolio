@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import altair as alt
+import matplotlib.pyplot as plt
+import io
+import base64
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Brokkoli Portfolio-Monitor", layout="wide")
@@ -113,9 +116,30 @@ def get_fx_rates():
             pass
     return rates
 
+def make_sparkline_data_uri(series_values, is_positive):
+    """Erzeugt ein transparentes Mini-Linienchart (ohne Achsen/Text) in Grün oder Rot als Base64-PNG."""
+    fig, ax = plt.subplots(figsize=(2.2, 0.55), dpi=100)
+    fig.patch.set_alpha(0.0)
+    ax.patch.set_alpha(0.0)
+
+    color = "#00CC96" if is_positive else "#FF4B4B"
+    if len(series_values) >= 2:
+        ax.plot(range(len(series_values)), series_values, color=color, linewidth=2.0)
+    else:
+        ax.plot([0, 1], [1, 1], color=color, linewidth=2.0)
+
+    ax.axis("off")
+    plt.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", transparent=True, dpi=100)
+    plt.close(fig)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{b64}"
+
 @st.cache_data(ttl=300)
 def get_quote_snapshots(isins_tuple):
-    """Lädt aktuellen Kurs, Vortagesschluss (1 Tag) und Schlusskurs vor 1 Jahr (in EUR)."""
+    """Lädt aktuellen Kurs, Vortagesschluss, 1-Jahres-Historie (in EUR) & Mini-Chart-Bild."""
     fx_rates = get_fx_rates()
     snapshots = {}
     target_1y = pd.Timestamp.today().normalize() - timedelta(days=365)
@@ -138,19 +162,31 @@ def get_quote_snapshots(isins_tuple):
             if not fx or fx <= 0:
                 fx = 1.0
 
-            cur_eur = float(hist["Close"].iloc[-1]) / fx
-            prev_1d_eur = float(hist["Close"].iloc[-2]) / fx if len(hist) >= 2 else cur_eur
+            close_eur = hist["Close"] / fx
+            cur_eur = float(close_eur.iloc[-1])
+            prev_1d_eur = float(close_eur.iloc[-2]) if len(close_eur) >= 2 else cur_eur
 
-            hist_1y = hist[hist.index <= target_1y]
-            if not hist_1y.empty:
-                prev_1y_eur = float(hist_1y["Close"].iloc[-1]) / fx
+            hist_1y_before = close_eur[close_eur.index <= target_1y]
+            if not hist_1y_before.empty:
+                prev_1y_eur = float(hist_1y_before.iloc[-1])
             else:
-                prev_1y_eur = float(hist["Close"].iloc[0]) / fx
+                prev_1y_eur = float(close_eur.iloc[0])
+
+            # 1-Jahres-Reihe für Mini-Chart & Pop-up
+            series_1y = close_eur[close_eur.index >= target_1y]
+            if series_1y.empty:
+                series_1y = close_eur
+
+            is_1y_pos = (cur_eur >= prev_1y_eur)
+            spark_uri = make_sparkline_data_uri(series_1y.tolist(), is_1y_pos)
 
             snapshots[isin] = {
                 "current": cur_eur,
                 "prev_1d": prev_1d_eur,
                 "prev_1y": prev_1y_eur,
+                "series_1y": series_1y,
+                "sparkline": spark_uri,
+                "is_1y_pos": is_1y_pos,
             }
         except Exception:
             pass
@@ -263,7 +299,6 @@ def build_intraday_series(aktiv_df, current_prices_dict):
             return pd.DataFrame()
 
         df_intra = pd.DataFrame(intraday_frames)
-        # Nur die letzten 24 Stunden mit echten Kursbewegungen behalten (ohne Wochenend-Flatline)
         df_intra = df_intra.dropna(how="all").ffill().bfill()
         last_ts = df_intra.index.max()
         df_intra = df_intra[df_intra.index >= (last_ts - timedelta(hours=24))]
@@ -276,6 +311,51 @@ def build_intraday_series(aktiv_df, current_prices_dict):
         })
     except Exception:
         return pd.DataFrame()
+
+# --- POP-UP DIALOG FÜR EINZELAKTIEN-JAHRESCHART ---
+@st.dialog("📈 1-Jahres-Kursverlauf", width="large")
+def show_stock_popup(stock_row, snap):
+    name = stock_row["Name"]
+    isin = stock_row["ISIN"]
+    cur_p = stock_row["Aktueller Kurs (€)"]
+    einstand = stock_row["Einstandskurs (€)"]
+
+    st.subheader(f"{name} ({isin})")
+
+    if snap and "series_1y" in snap and not snap["series_1y"].empty:
+        s_1y = snap["series_1y"]
+        start_p = float(s_1y.iloc[0])
+        perf_1y = ((cur_p - start_p) / start_p * 100) if start_p > 0 else 0.0
+        line_color = "#00CC96" if perf_1y >= 0 else "#FF4B4B"
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Aktueller Kurs", f"{cur_p:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+        c2.metric("Dein Einstand", f"{einstand:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+        c3.metric("1-Jahres-Trend", f"{perf_1y:+.2f} %")
+
+        df_pop = s_1y.reset_index()
+        df_pop.columns = ["Datum", "Kurs (€)"]
+
+        chart = alt.Chart(df_pop).mark_line(color=line_color, strokeWidth=2.5).encode(
+            x=alt.X("Datum:T", title=None, axis=alt.Axis(format="%d.%m.%Y")),
+            y=alt.Y("Kurs (€):Q", title="Kurs (€)", scale=alt.Scale(zero=False)),
+            tooltip=[
+                alt.Tooltip("Datum:T", title="Datum", format="%d.%m.%Y"),
+                alt.Tooltip("Kurs (€):Q", title="Kurs", format=",.2f")
+            ]
+        )
+
+        # Gestrichelte Linie für deinen Einstandskurs
+        einstand_rule = alt.Chart(pd.DataFrame({"y": [einstand]})).mark_rule(
+            color="#FFA500",
+            strokeDash=[5, 5],
+            strokeWidth=1.5
+        ).encode(y="y:Q")
+
+        st.altair_chart((chart + einstand_rule).properties(height=360).interactive(bind_y=False), use_container_width=True)
+        st.caption("🟠 Gestrichelte Linie = Dein durchschnittlicher Einstandskurs")
+    else:
+        st.info("Für diese Position liegen keine historischen 1-Jahres-Marktdaten bei Yahoo Finance vor.")
 
 st.title("📊 Aktuelle Portfolio-Performance")
 
@@ -330,6 +410,7 @@ if not aktiv.empty:
     aktuelle_kurse = []
     kurse_1d = []
     kurse_1y = []
+    sparklines = []
     current_prices_map = {}
 
     one_year_ago = pd.Timestamp.today().normalize() - timedelta(days=365)
@@ -346,17 +427,21 @@ if not aktiv.empty:
                 p_1y = einstand
             else:
                 p_1y = snap["prev_1y"]
+            spark_img = snap["sparkline"]
         else:
             cur_p = einstand
             p_1d = einstand
             p_1y = einstand
+            spark_img = make_sparkline_data_uri([einstand, einstand], True)
 
         aktuelle_kurse.append(cur_p)
         kurse_1d.append(p_1d)
         kurse_1y.append(p_1y)
+        sparklines.append(spark_img)
         current_prices_map[isin] = cur_p
 
     aktiv["Aktueller Kurs (€)"] = aktuelle_kurse
+    aktiv["1J-Verlauf"] = sparklines
     aktiv["Aktueller Wert (€)"] = aktiv["Bestand"] * aktiv["Aktueller Kurs (€)"]
 
     # --- 4. PERFORMANCE-ZEITRAUM AUSWÄHLBAR ("Gesamt", "1 Jahr", "1 Tag") ---
@@ -383,9 +468,9 @@ if not aktiv.empty:
         0.0
     )
 
-    aktiv = aktiv.sort_values(by="Name", ascending=True)
+    aktiv = aktiv.sort_values(by="Name", ascending=True).reset_index(drop=True)
 
-    # --- 5. KPI-ÜBERSICHT & FARBIGE TABELLE ---
+    # --- 5. KPI-ÜBERSICHT & FARBIGE TABELLE MIT MINI-CHART & POP-UP ---
     gesamt_invest = aktiv["Netto_Invest"].sum()
     gesamt_wert = aktiv["Aktueller Wert (€)"].sum()
     gesamt_gv = aktiv["Gewinn / Verlust (€)"].sum()
@@ -397,27 +482,42 @@ if not aktiv.empty:
     col2.metric("Investiertes Kapital", f"{gesamt_invest:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
     col3.metric(perf_label, f"{gesamt_gv:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."), f"{gesamt_perf:+.2f} %")
 
+    st.caption("💡 Klicke auf eine Zeile (oder den Mini-Chart), um den großen 1-Jahres-Chart im Pop-up zu öffnen.")
+
     def color_pos_neg(val):
         if pd.isna(val) or val == 0:
             return "color: #888888;"
         return "color: #00CC96; font-weight: 600;" if val > 0 else "color: #FF4B4B; font-weight: 600;"
 
-    display_cols = ["Name", "ISIN", "Bestand", "Einstandskurs (€)", "Aktueller Kurs (€)", "Aktueller Wert (€)", "Gewinn / Verlust (€)", "Performance (%)"]
+    display_cols = [
+        "Name", "ISIN", "Bestand", "Einstandskurs (€)",
+        "Aktueller Kurs (€)", "1J-Verlauf", "Aktueller Wert (€)",
+        "Gewinn / Verlust (€)", "Performance (%)"
+    ]
     styled_df = aktiv[display_cols].style.map(color_pos_neg, subset=["Gewinn / Verlust (€)", "Performance (%)"])
 
-    st.dataframe(
+    event = st.dataframe(
         styled_df,
         use_container_width=True,
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
         column_config={
             "Bestand": st.column_config.NumberColumn(format="%.2f"),
             "Einstandskurs (€)": st.column_config.NumberColumn(format="%.2f €"),
             "Aktueller Kurs (€)": st.column_config.NumberColumn(format="%.2f €"),
+            "1J-Verlauf": st.column_config.ImageColumn("1J-Chart", width="small"),
             "Aktueller Wert (€)": st.column_config.NumberColumn(format="%.2f €"),
             "Gewinn / Verlust (€)": st.column_config.NumberColumn(format="%+.2f €"),
             "Performance (%)": st.column_config.NumberColumn(format="%+.2f %%"),
         }
     )
+
+    # Wenn eine Zeile angeklickt wurde -> Pop-up öffnen
+    if event and event.selection and event.selection.rows:
+        selected_idx = event.selection.rows[0]
+        selected_row = aktiv.iloc[selected_idx]
+        show_stock_popup(selected_row, snapshots.get(selected_row["ISIN"]))
 
     st.markdown("---")
     st.subheader("📈 Portfolio-Wachstum (Historie)")
@@ -476,7 +576,6 @@ if not aktiv.empty:
                 )
             )
 
-        # Legende passt sich dynamisch an (im 1-Tag-Chart nur Depotwert)
         active_series = list(plot_df.columns)
         color_map = {"Depotwert (€)": "#00CC96", "Netto-Einzahlungen (€)": "#636EFA"}
 
