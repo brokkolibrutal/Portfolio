@@ -447,7 +447,9 @@ if not aktiv.empty:
         plot_df = history_df[history_df.index >= start_date]
 
     if not plot_df.empty:
-        chart_source = plot_df.reset_index().rename(columns={"index": "Datum"})
+        chart_source = plot_df.copy()
+        chart_source.index.name = "Datum"
+        chart_source = chart_source.reset_index()
         chart_long = chart_source.melt("Datum", var_name="Kennzahl", value_name="Betrag (€)")
 
         if show_year_guides:
