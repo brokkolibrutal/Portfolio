@@ -155,7 +155,8 @@ def get_quote_snapshots(isins_tuple):
         except Exception:
             pass
     return snapshots
-    @st.cache_data(ttl=3600)
+
+@st.cache_data(ttl=3600)
 def build_history_series(df_input, current_prices_dict):
     """Berechnet die tägliche Entwicklung von Depotwert und Netto-Einzahlungen ab 2017."""
     df_all = df_input.dropna(subset=["Datum"]).copy()
